@@ -1,0 +1,50 @@
+# Web Framework
+fastapi==0.103.2
+uvicorn==0.23.2
+
+# Database
+pymysql==1.1.0
+databases==0.7.0
+databases[mysql]==0.7.0
+aiomysql
+sqlalchemy>=1.4,<3
+cryptography
+
+# Cache
+redis==5.0.1
+
+# Authentication
+passlib[bcrypt]==1.7.4
+
+# AI & Machine Learning
+transformers==4.35.2
+torch==2.1.0
+sentencepiece
+protobuf
+numpy==1.24.3
+
+# LangChain
+langchain>=0.1.0
+langchain-community>=0.0.13
+langchain-pinecone>=0.0.1
+
+# Vector Database
+pinecone-client==3.2.2
+pinecone==3.2.2
+
+# PDF Processing
+pypdf==4.2.0
+
+# Embeddings
+sentence-transformers==2.7.0
+
+# Google AI
+google-cloud-aiplatform==1.36.4
+google-generativeai
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0
+
+# Uncomment if needed
+# googletrans==4.0.0-rc1
