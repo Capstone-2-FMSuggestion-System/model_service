@@ -32,6 +32,7 @@ app = FastAPI(
 class QueryRequest(BaseModel):
     question: str
     session_id: str | None = None  # Optional session_id, nếu không cung cấp sẽ tạo mới
+    user_id: int
 
 class NewSessionRequest(BaseModel):
     pass  # Không cần dữ liệu, chỉ để tạo session mới
@@ -122,20 +123,36 @@ async def query(request: QueryRequest):
     """Process a nutrition or menu query using RAG with Gemini translation"""
     global rag_chain
 
-    # Nếu không cung cấp session_id, tạo mới
+    # If no session_id provided, create new one
     if request.session_id is None:
         session_id = str(uuid.uuid4())
         with mysql_conn.cursor() as cursor:
-            cursor.execute("INSERT INTO chat_sessions (session_id) VALUES (%s)", (session_id,))
+            cursor.execute(
+                "INSERT INTO chat_sessions (session_id, user_id) VALUES (%s, %s)", 
+                (session_id, request.user_id)
+            )
             mysql_conn.commit()
         redis_client.set(f"session:{session_id}:count", 0, ex=86400)
-        logger.info(f"New session created automatically: {session_id}")
+        logger.info(f"New session created for user {request.user_id}: {session_id}")
     else:
         session_id = request.session_id
-        # Kiểm tra session_id có tồn tại không
-        if not redis_client.exists(f"session:{session_id}:count"):
-            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-        
+        # Verify session belongs to user
+        with mysql_conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT user_id FROM chat_sessions WHERE session_id = %s",
+                (session_id,)
+            )
+            result = cursor.fetchone()
+            if not result or result[0] != request.user_id:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="Not authorized to access this chat session"
+                )
+
+    # Kiểm tra session_id có tồn tại không
+    if not redis_client.exists(f"session:{session_id}:count"):
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    
     logger.info(f"Session ID: {session_id}")
 
     # Kiểm tra số câu hỏi trong phiên từ Redis
@@ -205,8 +222,8 @@ async def query(request: QueryRequest):
         # Lưu vào MySQL
         with mysql_conn.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO chat_messages (session_id, question, answer) VALUES (%s, %s, %s)",
-                (session_id, question, answer_vi)
+                "INSERT INTO chat_messages (session_id, user_id, question, answer) VALUES (%s, %s, %s, %s)",
+                (session_id, request.user_id, question, answer_vi)
             )
             mysql_conn.commit()
 
