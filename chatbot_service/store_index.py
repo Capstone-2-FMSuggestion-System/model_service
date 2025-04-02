@@ -1,7 +1,7 @@
 import os
 import logging
 from typing import List, Optional, Set
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 from langchain_community.vectorstores import Pinecone as LangchainPinecone
 from pinecone import Pinecone, ServerlessSpec
 from dotenv import load_dotenv
@@ -172,8 +172,8 @@ def list_indexed_files(index_name: str = "chatbot") -> List[str]:
 
 
 if __name__ == "__main__":
-    # Ví dụ sử dụng
-    current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Sửa đường dẫn đến thư mục Data
+    current_dir = os.path.dirname(os.path.abspath(__file__))
     data_directory = os.path.join(current_dir, 'Data')
     
     # Cập nhật index với dữ liệu mới
