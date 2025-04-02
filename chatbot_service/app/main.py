@@ -46,7 +46,7 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     question: str
     session_id: str | None = None  # Optional session_id, nếu không cung cấp sẽ tạo mới
-    user_id: int
+    user_id: int | None = None  # Bỏ yêu cầu bắt buộc user_id
 
 class NewSessionRequest(BaseModel):
     pass  # Không cần dữ liệu, chỉ để tạo session mới
@@ -209,27 +209,31 @@ async def query(request: QueryRequest):
     if request.session_id is None:
         session_id = str(uuid.uuid4())
         with mysql_conn.cursor() as cursor:
+            # Sửa để cho phép NULL trong user_id
+            user_id_value = request.user_id if request.user_id is not None else None
             cursor.execute(
                 "INSERT INTO chat_sessions (session_id, user_id, question_count) VALUES (%s, %s, %s)", 
-                (session_id, request.user_id, 0)
+                (session_id, user_id_value, 0)
             )
             mysql_conn.commit()
         redis_client.set(f"session:{session_id}:count", 0, ex=86400)
-        logger.info(f"New session created for user {request.user_id}: {session_id}")
+        logger.info(f"New session created for user {user_id_value}: {session_id}")
     else:
         session_id = request.session_id
-        # Verify session belongs to user
-        with mysql_conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT user_id FROM chat_sessions WHERE session_id = %s",
-                (session_id,)
-            )
-            result = cursor.fetchone()
-            if not result or str(result['user_id']) != str(request.user_id):
-                raise HTTPException(
-                    status_code=403, 
-                    detail="Not authorized to access this chat session"
+        # Bỏ xác thực user_id nếu không có request.user_id
+        if request.user_id is not None:
+            with mysql_conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT user_id FROM chat_sessions WHERE session_id = %s",
+                    (session_id,)
                 )
+                result = cursor.fetchone()
+                # Chỉ xác thực nếu có user_id trong DB và có user_id trong request
+                if result and result['user_id'] is not None and str(result['user_id']) != str(request.user_id):
+                    raise HTTPException(
+                        status_code=403, 
+                        detail="Not authorized to access this chat session"
+                    )
 
     # Kiểm tra session_id có tồn tại không trong Redis
     if not redis_client.exists(f"session:{session_id}:count"):
@@ -312,12 +316,17 @@ async def query(request: QueryRequest):
         
         # Lưu thông tin tin nhắn vào Redis để đồng bộ sau
         chat_msg_key = f"session:{session_id}:msg:{int(time.time())}"
-        redis_client.hmset(chat_msg_key, {
-            "user_id": request.user_id,
+        message_data = {
             "question": question,
             "answer": answer_vi,
             "timestamp": datetime.now().isoformat()
-        })
+        }
+        
+        # Chỉ thêm user_id vào dữ liệu nếu có
+        if request.user_id is not None:
+            message_data["user_id"] = request.user_id
+            
+        redis_client.hmset(chat_msg_key, message_data)
         redis_client.expire(chat_msg_key, 86400)  # TTL 24 giờ
         
         # Cache tin nhắn cần đồng bộ
@@ -376,10 +385,20 @@ async def force_sync():
                         
                         try:
                             with conn.cursor() as cursor:
-                                cursor.execute(
-                                    "INSERT INTO chat_messages (session_id, user_id, question, answer) VALUES (%s, %s, %s, %s)",
-                                    (session_id, msg['user_id'], msg['question'], msg['answer'])
-                                )
+                                # Kiểm tra xem có user_id trong dữ liệu tin nhắn không
+                                user_id_value = msg.get('user_id', None)
+                                
+                                # Tạo câu query SQL dựa trên có hay không user_id
+                                if user_id_value:
+                                    cursor.execute(
+                                        "INSERT INTO chat_messages (session_id, user_id, question, answer) VALUES (%s, %s, %s, %s)",
+                                        (session_id, user_id_value, msg['question'], msg['answer'])
+                                    )
+                                else:
+                                    cursor.execute(
+                                        "INSERT INTO chat_messages (session_id, question, answer) VALUES (%s, %s, %s)",
+                                        (session_id, msg['question'], msg['answer'])
+                                    )
                             # Xóa tin nhắn khỏi danh sách chờ
                             redis_client.srem(f"session:{session_id}:pending_msgs", msg_key)
                             sync_count += 1
@@ -393,6 +412,71 @@ async def force_sync():
     except Exception as e:
         logger.error(f"Lỗi khi đồng bộ dữ liệu: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Lỗi khi đồng bộ dữ liệu: {str(e)}")
+
+@app.get("/chat_history/{session_id}")
+async def get_chat_history(session_id: str):
+    """Lấy lịch sử trò chuyện dựa trên session_id"""
+    try:
+        # Kiểm tra xem session_id có tồn tại không
+        with mysql_conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM chat_sessions WHERE session_id = %s", (session_id,))
+            session = cursor.fetchone()
+            if not session:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+            
+            # Lấy lịch sử trò chuyện từ MySQL, sắp xếp theo thời gian giảm dần (mới nhất lên đầu)
+            cursor.execute(
+                "SELECT question, answer, timestamp FROM chat_messages WHERE session_id = %s ORDER BY timestamp DESC", 
+                (session_id,)
+            )
+            messages = cursor.fetchall()
+            
+            # Nếu không có tin nhắn trong MySQL, thử lấy từ Redis
+            if not messages:
+                # Lấy lịch sử chat từ Redis
+                chat_history = redis_client.lrange(f"session:{session_id}:history", 0, -1)
+                
+                if chat_history:
+                    # Chuyển đổi định dạng
+                    messages = []
+                    # Redis lưu tin nhắn mới nhất ở đầu (LPUSH), nên không cần đảo ngược lại
+                    for msg in chat_history:
+                        msg_str = msg.decode('utf-8')
+                        # Chia thành câu hỏi và trả lời
+                        parts = msg_str.split("\nAI: ")
+                        if len(parts) == 2:
+                            question = parts[0].replace("User: ", "")
+                            answer = parts[1]
+                            messages.append({
+                                "question": question,
+                                "answer": answer,
+                                "timestamp": None  # Redis không lưu timestamp
+                            })
+            
+            # Định dạng lại lịch sử trò chuyện để trả về
+            formatted_messages = []
+            for msg in messages:
+                formatted_msg = {
+                    "question": msg["question"],
+                    "answer": msg["answer"]
+                }
+                # Thêm timestamp nếu có
+                if "timestamp" in msg and msg["timestamp"]:
+                    formatted_msg["timestamp"] = msg["timestamp"].isoformat()
+                
+                formatted_messages.append(formatted_msg)
+            
+            return {
+                "session_id": session_id,
+                "messages": formatted_messages,
+                "question_count": session["question_count"]
+            }
+    except Exception as e:
+        logger.error(f"Error fetching chat history: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"An error occurred while fetching chat history: {str(e)}"
+        )
 
 @app.on_event("shutdown")
 async def shutdown_event():
