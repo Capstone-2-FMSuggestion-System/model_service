@@ -25,6 +25,8 @@ MANIFEST
 # Virtual Environment
 venv/
 env/
+myvenv/
+cursos/
 ENV/
 .env
 .env.local
